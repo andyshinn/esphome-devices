@@ -1,0 +1,81 @@
+esphome:
+  name: airdoo
+  platform: ESP32
+  board: featheresp32
+  includes:
+    - custom
+
+i2c:
+  sda: SDA
+  scl: SCL
+
+uart:
+  id: uart_bus
+  tx_pin: TX
+  rx_pin: RX
+  baud_rate: 9600
+
+wifi:
+  ssid: "NotProgrium"
+  password: !secret wifi_password
+
+web_server:
+  port: 80
+
+logger:
+  level: DEBUG
+
+# Enable Home Assistant API
+api:
+  password: !secret wifi_password
+
+ota:
+  password: !secret wifi_password
+
+output:
+  - platform: gpio
+    pin: GPIO27
+    id: gpio_d6
+
+  - platform: gpio
+    pin: GPIO33
+    id: gpio_d5
+    inverted: True
+
+sensor:
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    id: airdoo_wifi_signal
+
+  - platform: ccs811
+    eco2:
+      name: "Carbon dioxide equivilent"
+      id: airdoo_eco2
+    tvoc:
+      name: "Volatile organic compounds"
+      id: airdoo_tvoc
+    address: 0x5A
+    temperature: airdoo_temperature
+    humidity: airdoo_humidity
+
+  - platform: htu21d
+    temperature:
+      name: "Temperature"
+      id: airdoo_temperature
+    humidity:
+      name: "Humidity"
+      id: airdoo_humidity
+
+  - platform: custom
+    lambda: |-
+      auto hpma = new HPMA115Sensor(id(uart_bus));
+      App.register_component(hpma);
+      return {hpma->pm_2_5_sensor, hpma->pm_10_sensor};
+
+    sensors:
+      - name: "PM2.5"
+        unit_of_measurement: µg/m³
+        id: airdoo_pm2_5
+      - name: "PM10"
+        unit_of_measurement: µg/m³
+        id: airdoo_pm10
