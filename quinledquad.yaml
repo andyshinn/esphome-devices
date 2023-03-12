@@ -19,11 +19,6 @@ logger:
 web_server:
   port: 80
 
-switch:
-  - platform: gpio
-    name: "Q1_Onboard light"
-    pin: 2
-
 output:
   - platform: ledc
     pin: 16
@@ -44,7 +39,7 @@ output:
 
 light:
   - platform: cwww
-    name: "Q1_CCT_1"
+    name: "Garage Strips"
     cold_white: LED_gpio_16
     warm_white: LED_gpio_17
     cold_white_color_temperature: 153 mireds
