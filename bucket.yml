@@ -1,7 +1,8 @@
 external_components:
-  - source:
-      type: local
-      path: esphome-components/components
+  - source: github://jenscski/esphome-components
+    components:
+      - sh1107_base
+      - sh1107_i2c
 
 wifi:
   ssid: NotProgrium
@@ -54,16 +55,17 @@ status_led:
     number: $status_led_pin
     inverted: false
 
-output:
-  - platform: gpio
-    pin: $relay_pin
-    id: relay_output
+# output:
+#   - platform: gpio
+#     pin: $relay_pin
+#     id: relay_output
 
 switch:
-  - platform: output
+  - platform: gpio
+    pin: $relay_pin
+    name: "Relay"
     id: relay_switch
-    name: "Relay Output"
-    output: relay_output
+    internal: true
     on_turn_on:
       then:
         - light.turn_on:
@@ -82,6 +84,29 @@ switch:
             blue: 0%
             color_mode: RGB
             effect: "None"
+
+  # - platform: output
+  #   id: relay_switch
+  #   name: "Relay Output"
+  #   output: relay_output
+  #   on_turn_on:
+  #     then:
+  #       - light.turn_on:
+  #           id: status_pixel
+  #           red: 0%
+  #           green: 100%
+  #           blue: 0%
+  #           color_mode: RGB
+  #           effect: "Strobe"
+  #   on_turn_off:
+  #     then:
+  #       - light.turn_on:
+  #           id: status_pixel
+  #           red: 0%
+  #           green: 100%
+  #           blue: 0%
+  #           color_mode: RGB
+  #           effect: "None"
   - platform: template
     id: keep_screen_on_switch
     name: "Keep Screen On"
@@ -124,8 +149,6 @@ font:
       family: Roboto
     id: roboto
     size: 16
-  - file: "fonts/tahoma.ttf"
-    id: tahoma
 
 display:
   - platform: sh1107_i2c
@@ -133,10 +156,12 @@ display:
     address: 0x3C
     rotation: 90
     id: oled
-    lambda: |-
-      it.printf(0, 0, id(tahoma), TextAlign::TOP_LEFT, "Level: %f", id(etape_resistance).state);
-      it.printf(0, 20, id(tahoma), TextAlign::TOP_LEFT, "Temp: %s", "72°f");
-      it.printf(0, 40, id(tahoma), TextAlign::TOP_LEFT, "Pump: %s", id(relay_switch).state ? "On" : "Off");
+    pages:
+      - id: debug
+        lambda: |-
+          it.printf(0, 0, id(roboto), TextAlign::TOP_LEFT, "Level: %.0f%%", id(water_level).state);
+          it.printf(0, 20, id(roboto), TextAlign::TOP_LEFT, "Vol: %f gal", id(water_volume).state);
+          it.printf(0, 40, id(roboto), TextAlign::TOP_LEFT, "Pump: %s", id(relay_switch).state ? "On" : "Off");
 
 binary_sensor:
   - platform: gpio
@@ -180,14 +205,71 @@ script:
 sensor:
   - platform: resistance
     sensor: etape_source
-    configuration: DOWNSTREAM
-    resistor: 550Ohm
-    name: eTape Reading
-    id: etape_resistance
+    configuration: UPSTREAM
+    resistor: 2kOhm
+    name: Water Volume
+    id: water_volume
+    reference_voltage: 3.3V
+    device_class: water
+    unit_of_measurement: gal
+    filters:
+      - calibrate_linear:
+          - 2000.0 -> 0.0
+          - 400.0 -> 5.0
+      # - lambda: |-
+      #     const float etape_min = 2000.0;
+      #     const float etape_max = 400.0;
+      #     const float etape_range = etape_max - etape_min;
+      #     const float etape_percent = (x - etape_min) / etape_range;
+      #     ESP_LOGI("custom", "etape_percent: %f", etape_percent);
+      #     if (etape_percent > 1.0) return 100.0;
+      #     if (etape_percent < 0.0) return 0.0;
+      #     return etape_percent * 100.0;
 
   - platform: adc
     id: etape_source
     pin: $etape_pin
+    update_interval: 10s
+    attenuation: auto
+
+  - platform: template
+    name: Water Level
+    id: water_level
+    device_class: water
+    unit_of_measurement: "%"
+    accuracy_decimals: 1
+    lambda: |-
+      return id(water_volume).state;
+    filters:
+      - calibrate_linear:
+          - 0.0 -> 0.0
+          - 5.0 -> 100.0
+
+  # - platform: template
+  #   name: "eTape Level"
+  #   id: etape_level
+  #   lambda: |-
+  #     const float etape_min = 2000.0;
+  #     const float etape_max = 400.0;
+  #     const float etape_range = etape_max - etape_min;
+  #     const float etape_percent = (id(etape_resistance).state - etape_min) / etape_range;
+  #     ESP_LOGI("custom", "etape_percent: %f", etape_percent);
+  #     if (etape_percent > 1.0) return 100.0;
+  #     if (etape_percent < 0.0) return 0.0;
+  #     return etape_percent * 100.0;
+  #   unit_of_measurement: "%"
+  #   accuracy_decimals: 1
+  #   update_interval: 10s
+
+sprinkler:
+  - id: bucket_controller
+    name: "Bucket Controller"
+    standby_switch: "Bucket Watering Standby"
+    valves:
+      - valve_switch: "Plants Drip"
+        valve_switch_id: relay_switch
+        run_duration: 300s
+
 
 logger:
   level: DEBUG
