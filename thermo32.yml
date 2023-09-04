@@ -1,0 +1,184 @@
+esphome:
+  name: thermostat
+  comment: Home Thermostat
+
+wifi:
+  ssid: NotProgrium
+  password: !secret wifi_password
+
+logger:
+  level: ERROR
+
+web_server:
+  port: 80
+
+api:
+  encryption:
+    key: !secret key_thermo32
+
+esp32:
+  board: atmegazero_esp32s2
+
+ota:
+  password: !secret wifi_password
+
+i2c:
+  sda: GPIO8
+  scl: GPIO9
+
+spi:
+  clk_pin: GPIO36
+  mosi_pin: GPIO35
+  miso_pin: GPIO37
+
+font:
+  - file: "gfonts://Roboto"
+    id: roboto
+    size: 60
+
+color:
+  - id: color_heat
+    hex: FF0000
+  - id: color_cool
+    hex: 0000FF
+  - id: color_off
+    red: 50%
+    green: 50%
+    blue: 50%
+    white: 50%
+  - id: color_auto
+    hex: FFFF00
+  - id: temp_current
+    hex: FF00FF
+  - id: temp_target_low
+    red: 10%
+    green: 100%
+    blue: 50%
+    white: 50%
+  - id: temp_target_high
+    red: 0%
+    green: 0%
+    blue: 100%
+    white: 0%
+
+image:
+  - file: mdi:fan
+    id: fan_icon
+    resize: 60x60
+
+  - file: mdi:snowflake
+    id: cooling_icon
+    resize: 60x60
+
+  - file: mdi:fire
+    id: heating_icon
+    resize: 60x60
+
+  - file: mdi:autorenew
+    id: auto_icon
+    resize: 60x60
+
+  - file: mdi:power
+    id: off_icon
+    resize: 60x60
+
+display:
+  - platform: ili9xxx
+    model: ili9486
+    dc_pin: GPIO2
+    cs_pin: GPIO38
+    reset_pin: GPIO7
+    rotation: 90°
+    dimensions: 320x480
+    data_rate: 40MHz
+
+    lambda: |-
+      auto action = id(thermostat_home).action;
+      std::string action_text;
+
+      switch (action) {
+        case climate::CLIMATE_ACTION_OFF: action_text = "Off"; break;
+        case climate::CLIMATE_ACTION_HEATING: action_text = "Heating"; break;
+        case climate::CLIMATE_ACTION_COOLING: action_text = "Cooling"; break;
+        case climate::CLIMATE_ACTION_IDLE: action_text = "Idle"; break;
+        default: action_text = "Unknown"; break;
+      }
+
+      it.fill(Color::BLACK);
+      it.printf(0, 0, id(roboto), id(temp_current), "Current: %.1f°C", id(bme280_temperature).state);
+      it.printf(0, 80, id(roboto), id(temp_target_low), "Low: %.1f°C", id(thermostat_home).target_temperature_low);
+      it.printf(0, 160, id(roboto), id(temp_target_high), "High: %.1f°C", id(thermostat_home).target_temperature_high);
+      it.print(0, 240, id(roboto), TextAlign::TOP_LEFT, action_text.c_str());
+
+      if (id(thermostat_home).mode == climate::CLIMATE_MODE_OFF) {
+        it.image(it.get_width(), 240, id(off_icon), ImageAlign::TOP_RIGHT, id(color_off));
+      } else if (id(thermostat_home).mode == climate::CLIMATE_MODE_HEAT) {
+        it.image(it.get_width(), 240, id(heating_icon), ImageAlign::TOP_RIGHT, id(color_heat));
+      } else if (id(thermostat_home).mode == climate::CLIMATE_MODE_COOL) {
+        it.image(it.get_width(), 240, id(cooling_icon), ImageAlign::TOP_RIGHT, id(color_cool));
+      } else if (id(thermostat_home).mode == climate::CLIMATE_MODE_HEAT_COOL) {
+        it.image(it.get_width(), 240, id(auto_icon), ImageAlign::TOP_RIGHT, id(color_auto), id(color_auto));
+      } else {
+        it.image(it.get_width(), 240, id(off_icon), ImageAlign::TOP_RIGHT, id(color_off));
+      }
+
+switch:
+  - platform: gpio
+    pin: GPIO12
+    name: Fan
+    id: fan
+    internal: true
+  - platform: gpio
+    pin: GPIO16
+    name: Air Conditioner
+    id: cooling
+    internal: true
+  - platform: gpio
+    pin: GPIO18
+    name: Heater
+    id: heating
+    internal: true
+
+sensor:
+  - platform: bmp280
+    temperature:
+      name: Temperature
+      id: bme280_temperature
+      internal: true
+    pressure:
+      name: Pressure
+      id: bme280_pressure
+      internal: true
+    address: 0x76
+    update_interval: 60s
+
+climate:
+  - platform: thermostat
+    name: Thermostat
+    id: thermostat_home
+    sensor: bme280_temperature
+    min_cooling_off_time: 300s
+    min_cooling_run_time: 300s
+    min_heating_off_time: 300s
+    min_heating_run_time: 300s
+    min_idle_time: 30s
+    cool_action:
+      - switch.turn_on: cooling
+    heat_action:
+      - switch.turn_on: heating
+    idle_action:
+      - switch.turn_off: cooling
+      - switch.turn_off: heating
+
+    default_preset: Home
+    preset:
+      - name: Home
+        default_target_temperature_low: 68 °F
+        default_target_temperature_high: 73 °F
+        mode: heat_cool
+    visual:
+      min_temperature: 50 °F
+      max_temperature: 90 °F
+      temperature_step:
+        target_temperature: 0.2
+        current_temperature: 0.1
