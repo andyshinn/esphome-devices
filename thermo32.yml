@@ -31,70 +31,133 @@ spi:
   mosi_pin: GPIO35
   miso_pin: GPIO37
 
+globals:
+  - id: show_fahrenheit
+    type: bool
+    restore_value: no
+    initial_value: 'true'
+
+time:
+  - platform: sntp
+    id: sntp_time
+
 font:
-  - file: "gfonts://Roboto"
-    id: roboto
-    size: 60
+  - id: noto_sans
+    file: "gfonts://Noto Sans"
+    size: 80
+
+  - id: noto_sans_small
+    file: "gfonts://Noto Sans"
+    size: 26
+
+  - id: noto_sans_medium
+    file: "gfonts://Noto Sans"
+    size: 40
 
 color:
-  - id: color_heat
-    hex: FF0000
-  - id: color_cool
-    hex: 0000FF
-  - id: color_off
-    red: 50%
-    green: 50%
-    blue: 50%
-    white: 50%
+  - id: color_red
+    hex: "FF0000"
+
+  - id: color_blue
+    hex: "0000FF"
+
+  - id: color_green
+    hex: "00FF00"
+
   - id: color_auto
-    hex: FFFF00
-  - id: temp_current
-    hex: FF00FF
-  - id: temp_target_low
-    red: 10%
-    green: 100%
-    blue: 50%
-    white: 50%
-  - id: temp_target_high
-    red: 0%
-    green: 0%
-    blue: 100%
-    white: 0%
+    hex: "FFFF00"
+
+  - id: light_gray
+    hex: "EEEEEE"
 
 image:
   - file: mdi:fan
     id: fan_icon
-    resize: 60x60
+    resize: 80x80
 
   - file: mdi:snowflake
     id: cooling_icon
-    resize: 60x60
+    resize: 80x80
+
+  - file: mdi:snowflake
+    id: cooling_icon_small
+    resize: 26x26
+
+  - file: mdi:snowflake
+    id: cooling_icon_medium
+    resize: 40x40
 
   - file: mdi:fire
     id: heating_icon
-    resize: 60x60
+    resize: 80x80
+
+  - file: mdi:fire
+    id: heating_icon_small
+    resize: 26x26
+
+  - file: mdi:fire
+    id: heating_icon_medium
+    resize: 40x40
 
   - file: mdi:autorenew
     id: auto_icon
-    resize: 60x60
+    resize: 80x80
 
   - file: mdi:power
     id: off_icon
-    resize: 60x60
+    resize: 80x80
+
+  - id: arrow_up
+    file: mdi:arrow-up-bold-box
+    resize: 80x80
+
+  - id: arrow_down
+    file: mdi:arrow-down-bold-box
+    resize: 80x80
+
+  - id: arrow_left_medium
+    file: mdi:arrow-left-bold-box
+    resize: 40x40
+
+  - id: arrow_right_medium
+    file: mdi:arrow-right-bold-box
+    resize: 40x40
+
+  - id: home_temp
+    file: mdi:home-thermometer
+    resize: 80x80
 
 display:
   - platform: ili9xxx
+    id: thermostat_display
     model: ili9486
     dc_pin: GPIO2
     cs_pin: GPIO38
     reset_pin: GPIO7
     rotation: 90°
     dimensions: 320x480
-    data_rate: 40MHz
+    data_rate: 20MHz
 
     lambda: |-
       auto action = id(thermostat_home).action;
+      auto mode = id(thermostat_home).mode;
+
+      float current_temp = id(show_fahrenheit) ? (id(bme280_temperature).state * 9.0/5.0 + 32) : id(bme280_temperature).state;
+      float target_low = id(show_fahrenheit) ? (id(thermostat_home).target_temperature_low * 9.0/5.0 + 32) : id(thermostat_home).target_temperature_low;
+      float target_high = id(show_fahrenheit) ? (id(thermostat_home).target_temperature_high * 9.0/5.0 + 32) : id(thermostat_home).target_temperature_high;
+
+      char current_temp_str[10];
+      char target_low_str[10];
+      char target_high_str[10];
+
+      snprintf(current_temp_str, sizeof(current_temp_str), "%.1f", current_temp);
+      snprintf(target_low_str, sizeof(target_low_str), "%.1f", target_low);
+      snprintf(target_high_str, sizeof(target_high_str), "%.1f", target_high);
+
       std::string action_text;
+
+      // Start with a black screen
+      it.fill(Color::BLACK);
 
       switch (action) {
         case climate::CLIMATE_ACTION_OFF: action_text = "Off"; break;
@@ -104,23 +167,67 @@ display:
         default: action_text = "Unknown"; break;
       }
 
-      it.fill(Color::BLACK);
-      it.printf(0, 0, id(roboto), id(temp_current), "Current: %.1f°C", id(bme280_temperature).state);
-      it.printf(0, 80, id(roboto), id(temp_target_low), "Low: %.1f°C", id(thermostat_home).target_temperature_low);
-      it.printf(0, 160, id(roboto), id(temp_target_high), "High: %.1f°C", id(thermostat_home).target_temperature_high);
-      it.print(0, 240, id(roboto), TextAlign::TOP_LEFT, action_text.c_str());
-
-      if (id(thermostat_home).mode == climate::CLIMATE_MODE_OFF) {
-        it.image(it.get_width(), 240, id(off_icon), ImageAlign::TOP_RIGHT, id(color_off));
-      } else if (id(thermostat_home).mode == climate::CLIMATE_MODE_HEAT) {
-        it.image(it.get_width(), 240, id(heating_icon), ImageAlign::TOP_RIGHT, id(color_heat));
-      } else if (id(thermostat_home).mode == climate::CLIMATE_MODE_COOL) {
-        it.image(it.get_width(), 240, id(cooling_icon), ImageAlign::TOP_RIGHT, id(color_cool));
-      } else if (id(thermostat_home).mode == climate::CLIMATE_MODE_HEAT_COOL) {
-        it.image(it.get_width(), 240, id(auto_icon), ImageAlign::TOP_RIGHT, id(color_auto), id(color_auto));
-      } else {
-        it.image(it.get_width(), 240, id(off_icon), ImageAlign::TOP_RIGHT, id(color_off));
+      // Show current mode image in the lower right
+      switch (mode) {
+        case climate::CLIMATE_MODE_OFF: it.image(475, 315, id(off_icon), ImageAlign::BOTTOM_RIGHT, id(light_gray)); break;
+        case climate::CLIMATE_MODE_HEAT: it.image(475, 315, id(heating_icon), ImageAlign::BOTTOM_RIGHT, id(color_red)); break;
+        case climate::CLIMATE_MODE_COOL: it.image(475, 315, id(cooling_icon), ImageAlign::BOTTOM_RIGHT, id(color_blue)); break;
+        case climate::CLIMATE_MODE_HEAT_COOL: it.image(475, 315, id(auto_icon), ImageAlign::BOTTOM_RIGHT, id(color_auto)); break;
+        default: it.image(475, 315, id(off_icon), ImageAlign::BOTTOM_RIGHT, id(light_gray)); break;
       }
+
+      // Show home temperature icon in upper left
+      it.image(0, 14, id(home_temp), ImageAlign::TOP_LEFT, id(color_green), id(color_green));
+
+      // Show set point icons
+      it.image((it.get_width() /2) - 50, 150, id(heating_icon_medium), ImageAlign::CENTER_LEFT, id(color_red));
+      it.image((it.get_width() /2) - 50, 230, id(cooling_icon_medium), ImageAlign::CENTER_LEFT, id(color_blue));
+
+      // Show temperatures
+      it.print(100, 0, id(noto_sans), TextAlign::TOP_LEFT, current_temp_str);
+
+      // Set points smaller fonts
+      it.print(it.get_width() / 2, 150, id(noto_sans_medium), TextAlign::CENTER_LEFT, target_low_str);
+      it.print(it.get_width() / 2, 230, id(noto_sans_medium), TextAlign::CENTER_LEFT, target_high_str);
+
+      // Set point change arrows
+      it.image((it.get_width() /2) + 130, 150, id(arrow_right_medium), ImageAlign::CENTER_RIGHT, id(color_red));
+      it.image((it.get_width() /2) + 130, 230, id(arrow_right_medium), ImageAlign::CENTER_RIGHT, id(color_blue));
+
+      it.image((it.get_width() /2) - 100, 150, id(arrow_left_medium), ImageAlign::CENTER_LEFT, id(color_red));
+      it.image((it.get_width() /2) - 100, 230, id(arrow_left_medium), ImageAlign::CENTER_LEFT, id(color_blue));
+
+
+      // Show current action
+      it.print(0, it.get_height(), id(noto_sans_medium), TextAlign::BOTTOM_LEFT, action_text.c_str());
+
+      // Display time in the upper right
+      // it.strftime(340, 5, id(noto_sans_small), "%a, %b %d", id(sntp_time).now());
+      // it.strftime(340, 35, id(noto_sans_small), "%I:%M %P", id(sntp_time).now());
+      it.print(340, 5, id(noto_sans_small), id(light_gray), id(sntp_time).now().strftime("%a, %b %d").c_str());
+      it.print(340, 35, id(noto_sans_small), id(light_gray), id(sntp_time).now().strftime("%I:%M %P").c_str());
+
+touchscreen:
+  - platform: xpt2046
+    id: thermostat_touch
+    cs_pin: GPIO21
+    display: thermostat_display
+    # interrupt_pin: GPIO33  # This doesn't appear to be working so we comment out to use polling instead
+    update_interval: 50ms
+    report_interval: 1s
+    threshold: 400
+    calibration_x_min: 3870
+    calibration_x_max: 250
+    calibration_y_min: 3930
+    calibration_y_max: 260
+    on_touch:
+      - lambda: |-
+          ESP_LOGE("cal", "x=%d, y=%d, x_raw=%d, y_raw=%0d",
+            id(thermostat_touch).x,
+            id(thermostat_touch).y,
+            id(thermostat_touch).x_raw,
+            id(thermostat_touch).y_raw
+          );
 
 switch:
   - platform: gpio
@@ -152,11 +259,53 @@ sensor:
     address: 0x76
     update_interval: 60s
 
+binary_sensor:
+  - platform: touchscreen
+    id: thermostat_touch_heat_setpoint_down
+    touchscreen_id: thermostat_touch
+    name: Lower Heat Setpoint
+    x_min: 110
+    x_max: 170
+    y_min: 120
+    y_max: 180
+    internal: true
+    filters:
+      - autorepeat:
+          delay: 500ms
+          time_on: 500ms
+          time_off: 100ms
+    on_press:
+      - climate.control:
+          id: thermostat_home
+          target_temperature_low: !lambda |-
+            return id(thermostat_home).target_temperature_low - 0.1;
+
+  - platform: touchscreen
+    id: thermostat_touch_heat_setpoint_up
+    touchscreen_id: thermostat_touch
+    name: Raise Heat Setpoint
+    x_min: 340
+    x_max: 400
+    y_min: 120
+    y_max: 180
+    internal: true
+    filters:
+      - autorepeat:
+          delay: 500ms
+          time_on: 500ms
+          time_off: 100ms
+    on_press:
+      - climate.control:
+          id: thermostat_home
+          target_temperature_low: !lambda |-
+            return id(thermostat_home).target_temperature_low + 0.1;
+
 climate:
   - platform: thermostat
     name: Thermostat
     id: thermostat_home
     sensor: bme280_temperature
+    on_boot_restore_from: memory
     min_cooling_off_time: 300s
     min_cooling_run_time: 300s
     min_heating_off_time: 300s
