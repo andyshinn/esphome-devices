@@ -1,0 +1,128 @@
+esphome:
+  name: weather
+  comment: Weather Station
+
+esp32:
+  board: sparkfun_esp32micromod
+
+wifi:
+  ssid: NotProgrium
+  password: !secret wifi_password
+
+ota:
+  password: !secret wifi_password
+
+logger:
+  level: ERROR
+
+web_server:
+  port: 80
+
+api:
+  encryption:
+    key: !secret key_weather
+
+i2c:
+  sda: GPIO21
+  scl: GPIO22
+
+spi:
+  clk_pin: GPIO18
+  mosi_pin: GPIO23
+  miso_pin: GPIO19
+
+as3935_spi:
+  cs_pin: GPIO25
+  irq_pin: GPIO17
+
+sensor:
+  - platform: pulse_meter
+    pin:
+      number: GPIO14
+      mode: INPUT_PULLUP
+    name: Windspeed
+    icon: "mdi:weather-windy"
+    id: wind_meter
+    unit_of_measurement: 'mph'
+    accuracy_decimals: 1
+    timeout: 5s
+    filters:
+      - multiply: 0.0124285 #1.492mph per rotation so 1 / 60 / 2 * 1.491424
+      - sliding_window_moving_average: # Helps prevent too many datapoints
+          window_size: 15
+          send_every: 15
+
+  - platform: bme280
+    temperature:
+      name: "Temperature"
+      oversampling: 16x
+    pressure:
+      name: "Pressure"
+    humidity:
+      name: "Humidity"
+    address: 0x77
+    update_interval: 60s
+
+  - platform: as3935
+    lightning_energy:
+      name: "Lightning Energy"
+    distance:
+      name: "Distance Storm"
+
+  - platform: adc
+    pin: GPIO35
+    name: "Wind Direction Reading"
+    id: wind_direction_adc
+    internal: true
+
+  - platform: template
+    icon: "mdi:compass"
+    name: "Wind Direction"
+    id: wind_direction
+    lambda: |-
+      float adc = id(wind_direction_adc).state;
+      if (adc < 380) return 113.0;
+      if (adc < 393) return 68.0;
+      if (adc < 414) return 90.0;
+      if (adc < 456) return 158.0;
+      if (adc < 508) return 135.0;
+      if (adc < 551) return 203.0;
+      if (adc < 615) return 180.0;
+      if (adc < 680) return 23.0;
+      if (adc < 746) return 45.0;
+      if (adc < 801) return 248.0;
+      if (adc < 833) return 225.0;
+      if (adc < 878) return 338.0;
+      if (adc < 913) return 0.0;
+      if (adc < 940) return 293.0;
+      if (adc < 967) return 315.0;
+      if (adc < 990) return 270.0;
+      return -1.0;
+
+text_sensor:
+  - platform: template
+    name: "Wind Direction"
+    id: wind_direction_text
+    lambda: |-
+      float direction = id(wind_direction).state;
+      if (direction == 113) return std::string("ESE");
+      if (direction == 68) return std::string("ENE");
+      if (direction == 90) return std::string("E");
+      if (direction == 158) return std::string("SSE");
+      if (direction == 135) return std::string("SE");
+      if (direction == 203) return std::string("SSW");
+      if (direction == 180) return std::string("S");
+      if (direction == 23) return std::string("NNE");
+      if (direction == 45) return std::string("NE");
+      if (direction == 248) return std::string("WSW");
+      if (direction == 225) return std::string("SW");
+      if (direction == 338) return std::string("NNW");
+      if (direction == 0) return std::string("N");
+      if (direction == 293) return std::string("WNW");
+      if (direction == 315) return std::string("NW");
+      if (direction == 270) return std::string("W");
+      return std::string("INVALID");
+
+binary_sensor:
+  - platform: as3935
+    name: "Lightning Alert"
