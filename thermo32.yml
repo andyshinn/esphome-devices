@@ -5,6 +5,7 @@ esphome:
 wifi:
   ssid: NotProgrium
   password: !secret wifi_password
+  fast_connect: true
 
 logger:
   level: ERROR
@@ -137,84 +138,106 @@ display:
     rotation: 90°
     dimensions: 320x480
     data_rate: 20MHz
+    pages:
+      - id: home
+        lambda: |-
+          auto convertTemp = [](float temp) -> float {
+            return id(show_fahrenheit) ? (temp * 9.0 / 5.0 + 32) : temp;
+          };
 
-    lambda: |-
-      auto action = id(thermostat_home).action;
-      auto mode = id(thermostat_home).mode;
+          auto drawIcon = [&it](int x, int y, esphome::image::Image *id, esphome::display::ImageAlign align, esphome::Color color) {
+            it.image(x, y, id, align, color);
+          };
 
-      float current_temp = id(show_fahrenheit) ? (id(bme280_temperature).state * 9.0/5.0 + 32) : id(bme280_temperature).state;
-      float target_low = id(show_fahrenheit) ? (id(thermostat_home).target_temperature_low * 9.0/5.0 + 32) : id(thermostat_home).target_temperature_low;
-      float target_high = id(show_fahrenheit) ? (id(thermostat_home).target_temperature_high * 9.0/5.0 + 32) : id(thermostat_home).target_temperature_high;
+          auto printText = [&it](int x, int y, esphome::font::Font *font, esphome::display::TextAlign align, const char* text) {
+            it.print(x, y, font, align, text);
+          };
 
-      char current_temp_str[10];
-      char target_low_str[10];
-      char target_high_str[10];
+          auto action = id(thermostat_home).action;
+          auto mode = id(thermostat_home).mode;
 
-      snprintf(current_temp_str, sizeof(current_temp_str), "%.1f", current_temp);
-      snprintf(target_low_str, sizeof(target_low_str), "%.1f", target_low);
-      snprintf(target_high_str, sizeof(target_high_str), "%.1f", target_high);
+          float current_temp = convertTemp(id(bme280_temperature).state);
+          float target_low = convertTemp(id(thermostat_home).target_temperature_low);
+          float target_high = convertTemp(id(thermostat_home).target_temperature_high);
 
-      std::string action_text;
+          char current_temp_str[10];
+          char target_low_str[10];
+          char target_high_str[10];
 
-      // Start with a black screen
-      it.fill(Color::BLACK);
+          snprintf(current_temp_str, sizeof(current_temp_str), "%.1f", current_temp);
+          snprintf(target_low_str, sizeof(target_low_str), "%.1f", target_low);
+          snprintf(target_high_str, sizeof(target_high_str), "%.1f", target_high);
 
-      switch (action) {
-        case climate::CLIMATE_ACTION_OFF: action_text = "Off"; break;
-        case climate::CLIMATE_ACTION_HEATING: action_text = "Heating"; break;
-        case climate::CLIMATE_ACTION_COOLING: action_text = "Cooling"; break;
-        case climate::CLIMATE_ACTION_IDLE: action_text = "Idle"; break;
-        default: action_text = "Unknown"; break;
-      }
+          std::string action_text;
 
-      // Show current mode image in the lower right
-      switch (mode) {
-        case climate::CLIMATE_MODE_OFF: it.image(475, 315, id(off_icon), ImageAlign::BOTTOM_RIGHT, id(light_gray)); break;
-        case climate::CLIMATE_MODE_HEAT: it.image(475, 315, id(heating_icon), ImageAlign::BOTTOM_RIGHT, id(color_red)); break;
-        case climate::CLIMATE_MODE_COOL: it.image(475, 315, id(cooling_icon), ImageAlign::BOTTOM_RIGHT, id(color_blue)); break;
-        case climate::CLIMATE_MODE_HEAT_COOL: it.image(475, 315, id(auto_icon), ImageAlign::BOTTOM_RIGHT, id(color_auto)); break;
-        default: it.image(475, 315, id(off_icon), ImageAlign::BOTTOM_RIGHT, id(light_gray)); break;
-      }
+          it.fill(Color::BLACK);
 
-      // Show home temperature icon in upper left
-      it.image(0, 14, id(home_temp), ImageAlign::TOP_LEFT, id(color_green), id(color_green));
+          switch (action) {
+            case climate::CLIMATE_ACTION_OFF: action_text = "Off"; break;
+            case climate::CLIMATE_ACTION_HEATING: action_text = "Heating"; break;
+            case climate::CLIMATE_ACTION_COOLING: action_text = "Cooling"; break;
+            case climate::CLIMATE_ACTION_IDLE: action_text = "Idle"; break;
+            default: action_text = "Unknown"; break;
+          }
 
-      // Show set point icons
-      it.image((it.get_width() /2) - 50, 150, id(heating_icon_medium), ImageAlign::CENTER_LEFT, id(color_red));
-      it.image((it.get_width() /2) - 50, 230, id(cooling_icon_medium), ImageAlign::CENTER_LEFT, id(color_blue));
+          switch (mode) {
+            case climate::CLIMATE_MODE_OFF: drawIcon(475, 315, id(off_icon), ImageAlign::BOTTOM_RIGHT, id(light_gray)); break;
+            case climate::CLIMATE_MODE_HEAT: drawIcon(475, 315, id(heating_icon), ImageAlign::BOTTOM_RIGHT, id(color_red)); break;
+            case climate::CLIMATE_MODE_COOL: drawIcon(475, 315, id(cooling_icon), ImageAlign::BOTTOM_RIGHT, id(color_blue)); break;
+            case climate::CLIMATE_MODE_HEAT_COOL: drawIcon(475, 315, id(auto_icon), ImageAlign::BOTTOM_RIGHT, id(color_auto)); break;
+            default: drawIcon(475, 315, id(off_icon), ImageAlign::BOTTOM_RIGHT, id(light_gray)); break;
+          }
 
-      // Show temperatures
-      it.print(100, 0, id(noto_sans), TextAlign::TOP_LEFT, current_temp_str);
+          // Show current temp icon and text
+          drawIcon(0, 14, id(home_temp), ImageAlign::TOP_LEFT, id(color_green));
+          printText(100, 0, id(noto_sans), TextAlign::TOP_LEFT, current_temp_str);
 
-      // Set points smaller fonts
-      it.print(it.get_width() / 2, 150, id(noto_sans_medium), TextAlign::CENTER_LEFT, target_low_str);
-      it.print(it.get_width() / 2, 230, id(noto_sans_medium), TextAlign::CENTER_LEFT, target_high_str);
+          // Show set point icons
+          drawIcon((it.get_width() /2) - 50, 150, id(heating_icon_medium), ImageAlign::CENTER_LEFT, id(color_red));
+          drawIcon((it.get_width() /2) - 50, 230, id(cooling_icon_medium), ImageAlign::CENTER_LEFT, id(color_blue));
 
-      // Set point change arrows
-      it.image((it.get_width() /2) + 130, 150, id(arrow_right_medium), ImageAlign::CENTER_RIGHT, id(color_red));
-      it.image((it.get_width() /2) + 130, 230, id(arrow_right_medium), ImageAlign::CENTER_RIGHT, id(color_blue));
+          // Show set point text
+          printText(it.get_width() / 2, 150, id(noto_sans_medium), TextAlign::CENTER_LEFT, target_low_str);
+          printText(it.get_width() / 2, 230, id(noto_sans_medium), TextAlign::CENTER_LEFT, target_high_str);
 
-      it.image((it.get_width() /2) - 100, 150, id(arrow_left_medium), ImageAlign::CENTER_LEFT, id(color_red));
-      it.image((it.get_width() /2) - 100, 230, id(arrow_left_medium), ImageAlign::CENTER_LEFT, id(color_blue));
+          // Show set point arrows
+          drawIcon((it.get_width() /2) + 130, 150, id(arrow_right_medium), ImageAlign::CENTER_RIGHT, id(color_red));
+          drawIcon((it.get_width() /2) + 130, 230, id(arrow_right_medium), ImageAlign::CENTER_RIGHT, id(color_blue));
+          drawIcon((it.get_width() /2) - 100, 150, id(arrow_left_medium), ImageAlign::CENTER_LEFT, id(color_red));
+          drawIcon((it.get_width() /2) - 100, 230, id(arrow_left_medium), ImageAlign::CENTER_LEFT, id(color_blue));
 
+          // Current action text
+          printText(0, it.get_height(), id(noto_sans_medium), TextAlign::BOTTOM_LEFT, action_text.c_str());
 
-      // Show current action
-      it.print(0, it.get_height(), id(noto_sans_medium), TextAlign::BOTTOM_LEFT, action_text.c_str());
+          // Current date and time
+          printText(340, 5, id(noto_sans_small), TextAlign::TOP_LEFT, id(sntp_time).now().strftime("%a, %b %d").c_str());
+          printText(340, 35, id(noto_sans_small), TextAlign::TOP_LEFT, id(sntp_time).now().strftime("%I:%M %P").c_str());
+      - id: graphs
+        lambda: |-
+          it.graph(0, 0, id(temperature_graph));
 
-      // Display time in the upper right
-      // it.strftime(340, 5, id(noto_sans_small), "%a, %b %d", id(sntp_time).now());
-      // it.strftime(340, 35, id(noto_sans_small), "%I:%M %P", id(sntp_time).now());
-      it.print(340, 5, id(noto_sans_small), id(light_gray), id(sntp_time).now().strftime("%a, %b %d").c_str());
-      it.print(340, 35, id(noto_sans_small), id(light_gray), id(sntp_time).now().strftime("%I:%M %P").c_str());
+graph:
+  - id: temperature_graph
+    sensor: bme280_temperature
+    duration: 1h
+    width: 240
+    height: 150
+    border: false
+  - id: pressure_graph
+    sensor: bme280_pressure
+    duration: 1h
+    width: 240
+    height: 150
+    border: false
 
 touchscreen:
   - platform: xpt2046
     id: thermostat_touch
     cs_pin: GPIO21
     display: thermostat_display
-    # interrupt_pin: GPIO33  # This doesn't appear to be working so we comment out to use polling instead
-    update_interval: 50ms
-    report_interval: 1s
+    interrupt_pin: GPIO33  # This doesn't appear to be working so we comment out to use polling instead
+    # update_interval: 50ms
+    # report_interval: 1s
     threshold: 400
     calibration_x_min: 3870
     calibration_x_max: 250
@@ -228,6 +251,16 @@ touchscreen:
             id(thermostat_touch).x_raw,
             id(thermostat_touch).y_raw
           );
+
+button:
+  - platform: template
+    id: thermostat_page_next
+    name: Next Page
+    icon: mdi:arrow-right
+    on_press:
+      # Switch to next page
+      - display.page.show_next: thermostat_display
+
 
 switch:
   - platform: gpio
@@ -265,40 +298,62 @@ binary_sensor:
     touchscreen_id: thermostat_touch
     name: Lower Heat Setpoint
     x_min: 110
-    x_max: 170
-    y_min: 120
+    x_max: 200
+    y_min: 110
     y_max: 180
     internal: true
     filters:
       - autorepeat:
-          delay: 500ms
-          time_on: 500ms
-          time_off: 100ms
+          delay: 100ms
+          # time_on: 100ms
+          # time_off: 50ms
     on_press:
       - climate.control:
           id: thermostat_home
           target_temperature_low: !lambda |-
-            return id(thermostat_home).target_temperature_low - 0.1;
+            float temp_c = id(thermostat_home).target_temperature_low;
+            if (id(show_fahrenheit)) {
+              float adjustment_c = 0.2 * 5.0 / 9.0;
+              temp_c += -adjustment_c;
+              ESP_LOGE("cal", "temp_c=%f, adjustment_c=%f", temp_c, adjustment_c);
+            } else {
+              temp_c += -0.2;
+              ESP_LOGE("cal", "temp_c=%f", temp_c);
+            }
+            return temp_c;
+
+      - component.update: thermostat_display
 
   - platform: touchscreen
     id: thermostat_touch_heat_setpoint_up
     touchscreen_id: thermostat_touch
     name: Raise Heat Setpoint
-    x_min: 340
+    x_min: 310
     x_max: 400
-    y_min: 120
+    y_min: 110
     y_max: 180
     internal: true
     filters:
       - autorepeat:
-          delay: 500ms
-          time_on: 500ms
-          time_off: 100ms
+          delay: 10s
+          time_on: 50ms
+          time_off: 50ms
     on_press:
       - climate.control:
           id: thermostat_home
           target_temperature_low: !lambda |-
-            return id(thermostat_home).target_temperature_low + 0.1;
+            float temp_c = id(thermostat_home).target_temperature_low;
+            if (id(show_fahrenheit)) {
+              float adjustment_c = 0.2 * 5.0 / 9.0;
+              temp_c += adjustment_c;
+              ESP_LOGE("cal", "temp_c=%f, adjustment_c=%f", temp_c, adjustment_c);
+            } else {
+              temp_c += 0.2;
+              ESP_LOGE("cal", "temp_c=%f", temp_c);
+            }
+            return temp_c;
+
+      - component.update: thermostat_display
 
 climate:
   - platform: thermostat
