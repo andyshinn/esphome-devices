@@ -1,15 +1,17 @@
 substitutions:
   esphome_name: halloween-penta
+  friendly_name: Halloween Penta
 
 esphome:
   name: ${esphome_name}
+  friendly_name: ${friendly_name}
   platformio_options:
     board_build.flash_mode: dio
 
 esp32:
   board: esp32-c3-devkitm-1
   framework:
-    type: esp-idf
+    type: arduino
 
 wifi:
   ssid: NotProgrium
@@ -21,7 +23,8 @@ logger:
 
 api:
   reboot_timeout: 60min
-  password: !secret wifi_password
+  encryption:
+    key: !secret api_key_halloween
 
 ota:
   - platform: esphome
@@ -61,19 +64,22 @@ switch:
 binary_sensor:
   - platform: gpio
     pin: 2
-    name: Button_1
+    name: Button 1
+    internal: true
     filters:
       - invert:
 
   - platform: gpio
     pin: 8
-    name: Button_2
+    name: Button 2
+    internal: true
     filters:
       - invert:
 
   - platform: gpio
     pin: 9
-    name: Button_3
+    name: Button 3
+    internal: true
     filters:
       - invert:
 
@@ -106,31 +112,21 @@ output:
 
 light:
   - platform: monochromatic
-    name: "LED-1"
+    name: Strip 1
+    id: strip_1
     default_transition_length: 3s
-    id: led1
     output: led_channel_1
+    internal: true
 
   - platform: monochromatic
-    name: "LED-2"
+    name: Strip 2
+    id: strip_2
     default_transition_length: 3s
-    id: led2
     output: led_channel_2
+    internal: true
 
-  - platform: monochromatic
-    name: "LED-3"
-    default_transition_length: 3s
-    id: led3
-    output: led_channel_3
-
-  - platform: monochromatic
-    name: "LED-4"
-    default_transition_length: 3s
-    id: led4
-    output: led_channel_4
-
-  - platform: monochromatic
-    name: "LED-5"
-    default_transition_length: 3s
-    id: led5
-    output: led_channel_5
+  - platform: partition
+    name: UV Strip
+    segments:
+      - single_light_id: strip_1
+      - single_light_id: strip_2
