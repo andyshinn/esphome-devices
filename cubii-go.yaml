@@ -1,0 +1,565 @@
+# ---------------------------------------------------------------------------
+# Cubii Go -- replacement console
+# Adafruit ESP32-S2 Feather + 0.96" I2C OLED (SSD1306)
+#
+# GPIO7 gates the STEMMA QT rail and its pull-ups (HIGH = on, measured).
+# It MUST be a power_supply, not a gpio switch: power_supply sets up at
+# priority 1200, ahead of the I2C bus at 1000, and its enable_time is a
+# blocking delay. A gpio switch runs at 800 -- after the bus -- and offers
+# no settling delay, so the SSD1306 gets probed before its power-on reset
+# finishes and is marked FAILED permanently.
+#
+# Buttons:  [<]  [>]  [SCAN/RESET]   E-Switch LP1, 8mm snap-in, illuminated.
+# All three LEDs share GPIO17 through one LEDC channel: GPIO17 -> 390R (one
+# per LED) -> anode, cathodes to GND. Vf 2.1V, ~3.1 mA each, ~9.2 mA total,
+# well under the 20 mA pin drive strength. Each LED needs its OWN resistor.
+# ---------------------------------------------------------------------------
+
+substitutions:
+  reed_pin: GPIO18
+  prev_button_pin: GPIO5      # <  page left
+  next_button_pin: GPIO9      # >  page right
+  action_button_pin: GPIO6    # tap = SCAN, hold 2s = reset
+  i2c_power_pin: GPIO7
+  sda_pin: GPIO3
+  scl_pin: GPIO4
+
+  meters_per_stride: "1.7"
+  kcal_per_stride: "0.06"
+
+  # Metric:   dist_unit "km", dist_factor "0.001"
+  # Imperial: dist_unit "mi", dist_factor "0.000621371"
+  dist_unit: "mi"
+  dist_factor: "0.000621371"
+
+  idle_timeout: 12s
+  debounce: 210ms
+  scan_interval: 8s
+  screen_timeout: 3min
+  ha_interval: 30s          # how often anything reaches Home Assistant
+
+esphome:
+  name: cubii-go
+  friendly_name: Cubii Go
+  area: Office
+  on_boot:
+    - priority: 600
+      then:
+        - script.execute: screen_wake
+
+esp32:
+  board: adafruit_feather_esp32s2
+  variant: ESP32S2
+  framework:
+    type: esp-idf
+
+logger:
+  hardware_uart: UART0
+
+api:
+  encryption:
+    key: !secret cubii_go__encryption_key
+ota:
+  - platform: esphome
+    password: !secret cubii_go__ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: Cubii Fallback
+    password: !secret wifi_password
+
+captive_portal:
+
+power_supply:
+  - id: i2c_power
+    pin: ${i2c_power_pin}
+    enable_on_boot: true
+    enable_time: 100ms
+
+switch:
+  - platform: template
+    id: scan_mode
+    name: "SCAN Mode"
+    icon: mdi:autorenew
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    entity_category: config
+
+i2c:
+  sda: ${sda_pin}
+  scl: ${scl_pin}
+  scan: true
+  id: bus_a
+  frequency: 400kHz
+
+globals:
+  - id: session_start_strides
+    type: float
+    restore_value: no
+    initial_value: '0'
+
+  - id: screen_awake
+    type: bool
+    restore_value: no
+    initial_value: 'true'
+
+# ---------------------------------------------------------------------------
+# Sensors are split in two:
+#   internal: true  -> fast, feeds the OLED, never reaches Home Assistant
+#   named           -> mirrors of those, published every ${ha_interval}
+# ---------------------------------------------------------------------------
+sensor:
+  - platform: pulse_meter
+    id: stride_rate
+    internal: true
+    pin:
+      number: ${reed_pin}
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    unit_of_measurement: "RPM"
+    accuracy_decimals: 0
+    internal_filter: ${debounce}
+    internal_filter_mode: EDGE
+    timeout: ${idle_timeout}
+    total:
+      id: total_strides
+      internal: true
+      unit_of_measurement: "strides"
+      accuracy_decimals: 0
+
+  - platform: template
+    id: disp_strides
+    internal: true
+    update_interval: 1s
+    lambda: |-
+      if (isnan(id(total_strides).state)) return 0.0f;
+      return id(total_strides).state - id(session_start_strides);
+
+  - platform: template
+    id: disp_distance
+    internal: true
+    update_interval: 1s
+    lambda: 'return id(disp_strides).state * ${meters_per_stride} * ${dist_factor};'
+
+  - platform: template
+    id: disp_calories
+    internal: true
+    update_interval: 1s
+    lambda: 'return id(disp_strides).state * ${kcal_per_stride};'
+
+  - platform: duty_time
+    id: session_time
+    internal: true
+    update_interval: 1s
+    sensor: is_pedaling
+    restore: false
+
+  - platform: template
+    name: "Cadence"
+    unit_of_measurement: "RPM"
+    icon: mdi:speedometer
+    accuracy_decimals: 0
+    state_class: measurement
+    update_interval: 1s
+    lambda: 'return isnan(id(stride_rate).state) ? 0.0f : id(stride_rate).state;'
+    filters:
+      - throttle_average: ${ha_interval}
+
+  - platform: template
+    name: "Total Strides"
+    unit_of_measurement: "strides"
+    icon: mdi:shoe-print
+    accuracy_decimals: 0
+    state_class: total_increasing
+    update_interval: ${ha_interval}
+    lambda: 'return id(total_strides).state;'
+
+  - platform: template
+    name: "Session Strides"
+    unit_of_measurement: "strides"
+    icon: mdi:shoe-print
+    accuracy_decimals: 0
+    state_class: measurement
+    update_interval: ${ha_interval}
+    lambda: 'return id(disp_strides).state;'
+
+  - platform: template
+    name: "Session Distance"
+    unit_of_measurement: ${dist_unit}
+    device_class: distance
+    accuracy_decimals: 2
+    state_class: measurement
+    update_interval: ${ha_interval}
+    lambda: 'return id(disp_distance).state;'
+
+  - platform: template
+    name: "Session Calories"
+    unit_of_measurement: "kcal"
+    icon: mdi:fire
+    accuracy_decimals: 0
+    state_class: measurement
+    update_interval: ${ha_interval}
+    lambda: 'return id(disp_calories).state;'
+
+  - platform: template
+    name: "Session Time"
+    unit_of_measurement: "s"
+    device_class: duration
+    icon: mdi:timer-outline
+    accuracy_decimals: 0
+    state_class: measurement
+    update_interval: ${ha_interval}
+    lambda: 'return id(session_time).state;'
+
+  - platform: template
+    name: "Total Distance"
+    unit_of_measurement: ${dist_unit}
+    device_class: distance
+    state_class: total_increasing
+    accuracy_decimals: 3
+    update_interval: ${ha_interval}
+    lambda: |-
+      if (isnan(id(total_strides).state)) return NAN;
+      return id(total_strides).state * ${meters_per_stride} * ${dist_factor};
+
+  - platform: template
+    name: "Total Calories"
+    unit_of_measurement: "kcal"
+    icon: mdi:fire
+    state_class: total_increasing
+    accuracy_decimals: 0
+    update_interval: ${ha_interval}
+    lambda: |-
+      if (isnan(id(total_strides).state)) return NAN;
+      return id(total_strides).state * ${kcal_per_stride};
+
+  - platform: duty_time
+    id: total_time
+    name: "Total Pedaling Time"
+    update_interval: ${ha_interval}
+    sensor: is_pedaling
+    restore: true
+    icon: mdi:timer-sand
+    last_time:
+      name: "Last Pedaled"
+
+  - platform: uptime
+    name: "Uptime"
+    update_interval: 60s
+    entity_category: diagnostic
+
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    update_interval: 60s
+    entity_category: diagnostic
+
+binary_sensor:
+  - platform: template
+    id: is_pedaling
+    name: "Pedaling"
+    device_class: moving
+    icon: mdi:run
+    lambda: 'return !isnan(id(stride_rate).state) && id(stride_rate).state > 0;'
+    filters:
+      - delayed_off: 5s
+    on_press:
+      - script.execute: screen_wake
+
+  # Three buttons:  [<]  [>]  [SCAN/RESET]
+  #   <  tap      -> previous page
+  #   >  tap      -> next page
+  #   O  tap      -> toggle SCAN mode
+  #   O  hold 2s  -> reset session
+  # While the screen is blanked, ANY button only wakes it -- including the
+  # long press, so a reset can never happen on a display you can't see.
+  - platform: gpio
+    id: prev_button
+    internal: true
+    pin:
+      number: ${prev_button_pin}
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    filters:
+      - delayed_on: 20ms
+    on_press:
+      - if:
+          condition:
+            lambda: 'return id(screen_awake);'
+          then:
+            - switch.turn_off: scan_mode
+            - script.execute: prev_page
+      - script.execute: screen_wake
+
+  - platform: gpio
+    id: next_button
+    internal: true
+    pin:
+      number: ${next_button_pin}
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    filters:
+      - delayed_on: 20ms
+    on_press:
+      - if:
+          condition:
+            lambda: 'return id(screen_awake);'
+          then:
+            - switch.turn_off: scan_mode
+            - script.execute: next_page
+      - script.execute: screen_wake
+
+  # No on_press here: it would fire at the START of a long press and toggle
+  # SCAN on the way to a reset. Both gestures go through on_multi_click so
+  # they stay mutually exclusive.
+  - platform: gpio
+    id: action_button
+    internal: true
+    pin:
+      number: ${action_button_pin}
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    filters:
+      - delayed_on: 20ms
+    on_multi_click:
+      - timing:
+          - ON for at least 2s
+        then:
+          - if:
+              condition:
+                lambda: 'return id(screen_awake);'
+              then:
+                - script.execute: reset_session
+              else:
+                - script.execute: screen_wake
+
+      - timing:
+          - ON for at most 1s
+          - OFF for at least 0.1s
+        then:
+          - if:
+              condition:
+                lambda: 'return id(screen_awake);'
+              then:
+                - switch.toggle: scan_mode
+          - script.execute: screen_wake
+
+font:
+  - file:
+      type: gfonts
+      family: Roboto
+      weight: 400
+    id: font_label
+    size: 10
+
+  - file:
+      type: gfonts
+      family: Roboto
+      weight: 500
+    id: font_value
+    size: 12
+
+  - file:
+      type: gfonts
+      family: Roboto
+      weight: 700
+    id: font_huge
+    size: 34
+
+  - file:
+      type: gfonts
+      family: Roboto
+      weight: 700
+    id: font_mid
+    size: 16
+
+display:
+  - platform: ssd1306_i2c
+    i2c_id: bus_a
+    id: oled
+    model: SSD1306_128X64
+    address: 0x3c
+    update_interval: 500ms
+    pages:
+      - id: page_summary
+        lambda: |-
+          int t = isnan(id(session_time).state) ? 0 : (int) id(session_time).state;
+          int hh = t / 3600, mm = (t % 3600) / 60, ss = t % 60;
+
+          it.print(0, 0, id(font_label), "STRIDES");
+          it.printf(128, 0, id(font_value), TextAlign::TOP_RIGHT, "%.0f",
+                    id(disp_strides).state);
+
+          it.print(0, 12, id(font_label), "TIME");
+          if (hh > 0)
+            it.printf(128, 12, id(font_value), TextAlign::TOP_RIGHT,
+                      "%d:%02d:%02d", hh, mm, ss);
+          else
+            it.printf(128, 12, id(font_value), TextAlign::TOP_RIGHT,
+                      "%02d:%02d", mm, ss);
+
+          it.print(0, 24, id(font_label), "DISTANCE");
+          it.printf(128, 24, id(font_value), TextAlign::TOP_RIGHT, "%.2f ${dist_unit}",
+                    id(disp_distance).state);
+
+          it.print(0, 36, id(font_label), "CALORIES");
+          it.printf(128, 36, id(font_value), TextAlign::TOP_RIGHT, "%.0f",
+                    id(disp_calories).state);
+
+          it.print(0, 48, id(font_label), "RPM");
+          it.printf(128, 48, id(font_value), TextAlign::TOP_RIGHT, "%.0f",
+                    isnan(id(stride_rate).state) ? 0.0f : id(stride_rate).state);
+
+          if (id(is_pedaling).state) it.filled_rectangle(0, 61, 40, 3);
+          if (id(scan_mode).state) it.print(128, 60, id(font_label),
+                                            TextAlign::BASELINE_RIGHT, "SCAN");
+
+      - id: page_strides
+        lambda: |-
+          it.print(64, 2, id(font_label), TextAlign::TOP_CENTER, "STRIDES");
+          it.printf(64, 36, id(font_huge), TextAlign::CENTER, "%.0f",
+                    id(disp_strides).state);
+          if (id(scan_mode).state) it.print(128, 63, id(font_label),
+                                            TextAlign::BASELINE_RIGHT, "SCAN");
+
+      - id: page_time
+        lambda: |-
+          int t = isnan(id(session_time).state) ? 0 : (int) id(session_time).state;
+          int hh = t / 3600, mm = (t % 3600) / 60, ss = t % 60;
+          it.print(64, 2, id(font_label), TextAlign::TOP_CENTER, "TIME");
+          if (hh > 0)
+            it.printf(64, 36, id(font_mid), TextAlign::CENTER, "%d:%02d:%02d",
+                      hh, mm, ss);
+          else
+            it.printf(64, 36, id(font_huge), TextAlign::CENTER, "%02d:%02d",
+                      mm, ss);
+          if (id(scan_mode).state) it.print(128, 63, id(font_label),
+                                            TextAlign::BASELINE_RIGHT, "SCAN");
+
+      - id: page_calories
+        lambda: |-
+          it.print(64, 2, id(font_label), TextAlign::TOP_CENTER, "CALORIES");
+          it.printf(64, 36, id(font_huge), TextAlign::CENTER, "%.0f",
+                    id(disp_calories).state);
+          if (id(scan_mode).state) it.print(128, 63, id(font_label),
+                                            TextAlign::BASELINE_RIGHT, "SCAN");
+
+      - id: page_distance
+        lambda: |-
+          it.print(64, 2, id(font_label), TextAlign::TOP_CENTER, "DISTANCE");
+          it.printf(64, 34, id(font_huge), TextAlign::CENTER, "%.2f",
+                    id(disp_distance).state);
+          it.print(64, 62, id(font_label), TextAlign::BASELINE_CENTER, "${dist_unit}");
+          if (id(scan_mode).state) it.print(128, 63, id(font_label),
+                                            TextAlign::BASELINE_RIGHT, "SCAN");
+
+      - id: page_rpm
+        lambda: |-
+          it.print(64, 2, id(font_label), TextAlign::TOP_CENTER, "RPM");
+          it.printf(64, 36, id(font_huge), TextAlign::CENTER, "%.0f",
+                    isnan(id(stride_rate).state) ? 0.0f : id(stride_rate).state);
+          if (id(scan_mode).state) it.print(128, 63, id(font_label),
+                                            TextAlign::BASELINE_RIGHT, "SCAN");
+
+      - id: page_reset
+        lambda: |-
+          it.print(64, 20, id(font_mid), TextAlign::CENTER, "SESSION");
+          it.print(64, 42, id(font_mid), TextAlign::CENTER, "RESET");
+
+script:
+  # page_reset lives in the same page list, so both directions step over it.
+  - id: prev_page
+    mode: restart
+    then:
+      - display.page.show_previous: oled
+      - if:
+          condition:
+            lambda: 'return id(oled).get_active_page() == id(page_reset);'
+          then:
+            - display.page.show_previous: oled
+      - component.update: oled
+
+  - id: next_page
+    mode: restart
+    then:
+      - display.page.show_next: oled
+      - if:
+          condition:
+            lambda: 'return id(oled).get_active_page() == id(page_reset);'
+          then:
+            - display.page.show: page_summary
+      - component.update: oled
+
+  # mode: restart means every call cancels the pending blank and starts the
+  # countdown over -- that's the whole idle timer.
+  - id: screen_wake
+    mode: restart
+    then:
+      - if:
+          condition:
+            lambda: 'return !id(screen_awake);'
+          then:
+            - lambda: |-
+                id(oled).turn_on();
+                id(screen_awake) = true;
+      - delay: ${screen_timeout}
+      - lambda: |-
+          id(oled).turn_off();
+          id(screen_awake) = false;
+
+  - id: reset_session
+    mode: restart
+    then:
+      - script.execute: screen_wake
+      - lambda: |-
+          id(session_start_strides) =
+              isnan(id(total_strides).state) ? 0.0f : id(total_strides).state;
+          ESP_LOGI("cubii", "session reset at %.0f lifetime strides",
+                   id(session_start_strides));
+      - sensor.duty_time.reset: session_time
+      - display.page.show: page_reset
+      - component.update: oled
+      - display.page.show: page_summary
+      - component.update: oled
+
+interval:
+  - interval: ${scan_interval}
+    then:
+      - if:
+          condition:
+            and:
+              - switch.is_on: scan_mode
+              - lambda: 'return id(screen_awake);'
+              - not:
+                  lambda: 'return id(oled).get_active_page() == id(page_reset);'
+          then:
+            - script.execute: next_page
+
+  # Re-arm the idle timer while pedaling, so a long session never blanks.
+  - interval: 30s
+    then:
+      - if:
+          condition:
+            binary_sensor.is_on: is_pedaling
+          then:
+            - script.execute: screen_wake
+
+button:
+  - platform: template
+    name: "Reset Session"
+    icon: mdi:restart
+    on_press:
+      - script.execute: reset_session
+
+  - platform: restart
+    name: "Restart"
+    entity_category: config

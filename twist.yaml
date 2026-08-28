@@ -1,0 +1,162 @@
+substitutions:
+  speed_steps: 10
+  led_brightness: 50%
+
+esphome:
+  name: twist-test
+
+esp32:
+  board: adafruit_feather_esp32s3
+  framework:
+    type: esp-idf
+  variant: esp32s3
+
+external_components:
+  - source:
+      type: local
+      path: external_components
+    components:
+      - twist
+
+switch:
+  - platform: gpio
+    pin: I2C_POWER
+    id: i2c_power
+    restore_mode: ALWAYS_ON
+
+  - platform: template
+    name: LED
+    id: led_power
+    restore_mode: RESTORE_DEFAULT_ON
+    optimistic: true
+    turn_on_action:
+      - light.turn_on: twist_light
+    turn_off_action:
+      - light.turn_off: twist_light
+i2c:
+  id: i2c_bus
+  sda: SDA
+  scl: SCL
+  # frequency: 10kHz
+  scan: true  # Disable automatic scan
+
+wifi:
+  ssid: "NotProgrium"
+  password: !secret wifi_password
+
+api:
+  reboot_timeout: 60min
+  encryption:
+    key: !secret api_key_twist
+
+ota:
+  - platform: esphome
+    password: !secret wifi_password
+
+web_server:
+  version: 3
+  port: 80
+
+logger:
+  level: DEBUG
+
+number:
+  - platform: template
+    name: "Fan Speed Step"
+    internal: true
+    id: fan_speed_step
+    step: 1
+    min_value: 1
+    max_value: ${speed_steps}
+    icon: "mdi:fan"
+    optimistic: true
+    set_action:
+      - fan.turn_on:
+          id: pc_fan
+          speed: !lambda 'return x;'
+
+# PWM output for fan control
+output:
+  - platform: ledc
+    pin: GPIO12  # PWM pin for fan
+    frequency: 25000Hz  # Standard PC fan PWM frequency (25kHz)
+    id: fan_pwm
+
+# Fan speed component
+fan:
+  - platform: speed
+    output: fan_pwm
+    name: "PC Fan"
+    id: pc_fan
+    speed_count: ${speed_steps}
+    on_turn_on:
+      - light.control:
+          id: twist_light
+          red: 0%
+          green: 100%
+          blue: 0%
+    on_turn_off:
+      - light.control:
+          id: twist_light
+          red: 100%
+          green: 0%
+          blue: 0%
+
+twist:
+  id: twist_encoder
+  setup_priority: -100  # Setup after I2C power is stable
+  on_clockwise:
+    - logger.log: "trigger Turned clockwise!"
+    - if:
+        condition:
+          fan.is_on: pc_fan
+        then:
+          - number.increment:
+              id: fan_speed_step
+              cycle: false
+  on_counter_clockwise:
+    - logger.log: "trigger Turned counter-clockwise!"
+    - if:
+        condition:
+          fan.is_on: pc_fan
+        then:
+          - number.decrement:
+              id: fan_speed_step
+              cycle: false
+  on_press:
+    - logger.log: "Button pressed!"
+    - fan.toggle:
+        id: pc_fan
+
+sensor:
+  # Pulse counter for fan tachometer
+  - platform: pulse_counter
+    pin:
+      number: GPIO13  # Tachometer input pin
+      mode:
+        input: true
+        pullup: true
+    name: "Fan RPM"
+    id: fan_rpm
+    unit_of_measurement: 'RPM'
+    accuracy_decimals: 0
+    filters:
+      - multiply: 0.5  # PC fans typically have 2 pulses per revolution
+    update_interval: 60s
+  - platform: xgzp68xx
+    address: 0x58
+    temperature:
+      name: "Temperature"
+    pressure:
+      name: "Differential Pressure"
+      filters:
+        - offset: 40.5
+
+binary_sensor:
+
+light:
+  - platform: twist
+    twist_id: twist_encoder
+    name: "Twist RGB"
+    id: twist_light
+    internal: true
