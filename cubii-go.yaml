@@ -38,13 +38,27 @@ substitutions:
   screen_timeout: 3min
   ha_interval: 30s          # how often anything reaches Home Assistant
 
+  # Lifetime odometer: the only continuously-changing value written to flash.
+  # The restoring global is a PollingComponent -- update_interval is how often
+  # it memcmps itself against the stored copy and queues an NVS write, so a
+  # power cut can cost at most this much pedaling. Everything else persisted
+  # here changes once a day and polls at 1s for free.
+  odo_flush: 10min
+
+  timezone: America/Chicago
+  daily_reset_hour: "4"       # local hour the day rolls over (0-23)
+  daily_goal_default: "3000"  # only applies on a fresh NVS; live in HA after
+
 esphome:
   name: cubii-go
   friendly_name: Cubii Go
   area: Office
   on_boot:
+    # 600 is below the globals component's HARDWARE (800), so the restored
+    # odometer is already loaded by the time this runs.
     - priority: 600
       then:
+        - lambda: 'id(session_start_strides) = id(odo_strides);'
         - script.execute: screen_wake
 
 esp32:
@@ -72,6 +86,19 @@ wifi:
 
 captive_portal:
 
+# SNTP rather than the homeassistant source: the daily rollover keeps working
+# with HA down, and it is the clock that decides which day a stride belongs to.
+time:
+  - platform: sntp
+    id: sntp_time
+    timezone: ${timezone}
+    servers:
+      - 0.pool.ntp.org
+      - 1.pool.ntp.org
+      - 2.pool.ntp.org
+    on_time_sync:
+      - script.execute: check_rollover
+
 power_supply:
   - id: i2c_power
     pin: ${i2c_power_pin}
@@ -94,7 +121,67 @@ i2c:
   id: bus_a
   frequency: 400kHz
 
+# ---------------------------------------------------------------------------
+# Persistence model
+#
+# pulse_meter's total is boot-relative, so it cannot be the lifetime figure.
+# odo_strides is: every publish of total_strides adds the delta to it, and the
+# global flushes to NVS every ${odo_flush}.
+#
+# Nothing daily is counted separately. day_start_odo is the odometer reading
+# at the last rollover and day_start_secs the lifetime pedaling seconds at the
+# same instant, so today = lifetime - snapshot. Those snapshots only move once
+# a day, which is why they can poll at 1s without touching flash: the poll is a
+# memcmp, and a write is only queued when the value actually changed.
+# ---------------------------------------------------------------------------
 globals:
+  # Lifetime strides. Survives reboots; written every ${odo_flush}.
+  - id: odo_strides
+    type: float
+    restore_value: yes
+    update_interval: ${odo_flush}
+    initial_value: '0'
+
+  # Last value seen from pulse_meter's boot-relative total, for the delta.
+  - id: last_raw_total
+    type: float
+    restore_value: no
+    initial_value: '0'
+
+  # Logical date (YYYYMMDD, shifted back ${daily_reset_hour}h) of the current
+  # day. 0 means "never had a valid clock yet".
+  - id: day_stamp
+    type: uint32_t
+    restore_value: yes
+    initial_value: '0'
+
+  - id: day_start_odo
+    type: float
+    restore_value: yes
+    initial_value: '0'
+
+  - id: day_start_secs
+    type: float
+    restore_value: yes
+    initial_value: '0'
+
+  - id: yesterday_strides
+    type: float
+    restore_value: yes
+    initial_value: '0'
+
+  - id: yesterday_secs
+    type: float
+    restore_value: yes
+    initial_value: '0'
+
+  # Latched for the day, so raising the goal after hitting it does not
+  # retroactively un-hit it, and a reboot does not re-fire the automation.
+  - id: day_goal_hit
+    type: bool
+    restore_value: yes
+    initial_value: 'false'
+
   - id: session_start_strides
     type: float
     restore_value: no
@@ -122,8 +209,22 @@ sensor:
       inverted: true
     unit_of_measurement: "RPM"
     accuracy_decimals: 0
+    # PULSE, not EDGE. The reed bounces ~8 electrical edges per revolution
+    # (measured with the ESP32 PCNT peripheral, unfiltered). EDGE mode absorbed
+    # that only by holding a 210ms blackout after each count, and the
+    # closed window scales with cadence -- so at slow pedaling the break chatter
+    # landed outside the blackout and counted a second stride.
+    #
+    # PULSE is level-based instead of time-since-last-count: it latches only
+    # when the contact holds closed for >= ${debounce}, and re-arms only when it
+    # holds open for >= ${debounce}. A bounce burst satisfies neither, so it is
+    # rejected outright, and the behaviour is the same at 10 RPM and 110 RPM
+    # because there is no cadence-dependent window.
+    #
+    # This only works because the filter is SHORT. At the old 210ms it would
+    # count nothing at all -- the closed window is only 38-120ms.
     internal_filter: ${debounce}
-    internal_filter_mode: EDGE
+    internal_filter_mode: PULSE
     timeout: ${idle_timeout}
     total:
       id: total_strides
@@ -132,14 +233,18 @@ sensor:
       accuracy_decimals: 0
       on_value:
         - script.execute: refresh_display
+        - lambda: |-
+            if (isnan(x)) return;
+            float d = x - id(last_raw_total);
+            if (d < 0) d = x;          // pulse_meter total restarted
+            if (d > 0) id(odo_strides) += d;
+            id(last_raw_total) = x;
 
   - platform: template
     id: disp_strides
     internal: true
     update_interval: 1s
-    lambda: |-
-      if (isnan(id(total_strides).state)) return 0.0f;
-      return id(total_strides).state - id(session_start_strides);
+    lambda: 'return id(odo_strides) - id(session_start_strides);'
 
   - platform: template
     id: disp_distance
@@ -158,6 +263,22 @@ sensor:
       if (isnan(id(total_strides).state)) return 0.0f;
       return (id(total_strides).state - id(session_start_strides))
              * ${kcal_per_stride};
+
+  # Today = lifetime - the snapshot taken at the last rollover. Also where the
+  # goal latch is set, so it happens on the same 1s cadence the display reads.
+  - platform: template
+    id: disp_day_strides
+    internal: true
+    update_interval: 1s
+    lambda: |-
+      float v = id(odo_strides) - id(day_start_odo);
+      if (v < 0) v = 0;
+      float goal = id(daily_goal).state;
+      if (!id(day_goal_hit) && !isnan(goal) && goal > 0 && v >= goal) {
+        id(day_goal_hit) = true;
+        ESP_LOGI("cubii", "daily goal reached: %.0f / %.0f strides", v, goal);
+      }
+      return v;
 
   - platform: duty_time
     id: session_time
@@ -184,7 +305,7 @@ sensor:
     accuracy_decimals: 0
     state_class: total_increasing
     update_interval: ${ha_interval}
-    lambda: 'return id(total_strides).state;'
+    lambda: 'return id(odo_strides);'
 
   - platform: template
     name: "Session Strides"
@@ -230,9 +351,7 @@ sensor:
     state_class: total_increasing
     accuracy_decimals: 3
     update_interval: ${ha_interval}
-    lambda: |-
-      if (isnan(id(total_strides).state)) return NAN;
-      return id(total_strides).state * ${meters_per_stride} * ${dist_factor};
+    lambda: 'return id(odo_strides) * ${meters_per_stride} * ${dist_factor};'
 
   - platform: template
     name: "Total Calories"
@@ -241,9 +360,7 @@ sensor:
     state_class: total_increasing
     accuracy_decimals: 0
     update_interval: ${ha_interval}
-    lambda: |-
-      if (isnan(id(total_strides).state)) return NAN;
-      return id(total_strides).state * ${kcal_per_stride};
+    lambda: 'return id(odo_strides) * ${kcal_per_stride};'
 
   - platform: duty_time
     id: total_time
@@ -254,6 +371,82 @@ sensor:
     icon: mdi:timer-sand
     last_time:
       name: "Last Pedaled"
+
+  - platform: template
+    name: "Daily Strides"
+    unit_of_measurement: "strides"
+    icon: mdi:shoe-print
+    accuracy_decimals: 0
+    state_class: measurement
+    update_interval: ${ha_interval}
+    lambda: 'return id(disp_day_strides).state;'
+
+  - platform: template
+    name: "Daily Distance"
+    unit_of_measurement: ${dist_unit}
+    device_class: distance
+    accuracy_decimals: 2
+    state_class: measurement
+    update_interval: ${ha_interval}
+    lambda: 'return id(disp_day_strides).state * ${meters_per_stride} * ${dist_factor};'
+
+  - platform: template
+    name: "Daily Calories"
+    unit_of_measurement: "kcal"
+    icon: mdi:fire
+    accuracy_decimals: 0
+    state_class: measurement
+    update_interval: ${ha_interval}
+    lambda: 'return id(disp_day_strides).state * ${kcal_per_stride};'
+
+  # duty_time only refreshes on its own update_interval, so this moves in
+  # ${ha_interval} steps -- which is also how often it is published.
+  - platform: template
+    name: "Daily Time"
+    unit_of_measurement: "s"
+    device_class: duration
+    icon: mdi:timer-outline
+    accuracy_decimals: 0
+    state_class: measurement
+    update_interval: ${ha_interval}
+    lambda: |-
+      if (isnan(id(total_time).state)) return NAN;
+      float v = id(total_time).state - id(day_start_secs);
+      return v < 0 ? 0.0f : v;
+
+  - platform: template
+    name: "Daily Goal Progress"
+    unit_of_measurement: "%"
+    icon: mdi:target
+    accuracy_decimals: 0
+    state_class: measurement
+    update_interval: ${ha_interval}
+    lambda: |-
+      float goal = id(daily_goal).state;
+      if (isnan(goal) || goal <= 0) return NAN;
+      return 100.0f * id(disp_day_strides).state / goal;
+
+  # Captured at rollover, so HA keeps a completed-day figure even if it was
+  # not looking. If the device sat powered off for days, this is the last day
+  # that actually saw pedaling, not literally yesterday.
+  - platform: template
+    name: "Yesterday Strides"
+    unit_of_measurement: "strides"
+    icon: mdi:shoe-print
+    accuracy_decimals: 0
+    state_class: measurement
+    update_interval: ${ha_interval}
+    lambda: 'return id(yesterday_strides);'
+
+  - platform: template
+    name: "Yesterday Time"
+    unit_of_measurement: "s"
+    device_class: duration
+    icon: mdi:timer-outline
+    accuracy_decimals: 0
+    state_class: measurement
+    update_interval: ${ha_interval}
+    lambda: 'return id(yesterday_secs);'
 
   - platform: uptime
     name: "Uptime"
@@ -276,6 +469,11 @@ binary_sensor:
       - delayed_off: 5s
     on_press:
       - script.execute: screen_wake
+
+  - platform: template
+    name: "Daily Goal Reached"
+    icon: mdi:trophy
+    lambda: 'return id(day_goal_hit);'
 
   # Three buttons:  [<]  [>]  [SCAN/RESET]
   #   <  tap      -> previous page
@@ -362,6 +560,45 @@ binary_sensor:
                 - component.update: oled
           - script.execute: screen_wake
 
+number:
+  - platform: template
+    id: daily_goal
+    name: "Daily Stride Goal"
+    icon: mdi:target
+    unit_of_measurement: "strides"
+    optimistic: true
+    restore_value: true
+    initial_value: ${daily_goal_default}
+    min_value: 0
+    max_value: 50000
+    step: 100
+    mode: box
+    entity_category: config
+
+  # Escape hatch: seed prior mileage, correct drift, or put the odometer back
+  # after an NVS erase. Shifts the day and session snapshots by the same amount
+  # so neither jumps when the lifetime figure does.
+  - platform: template
+    name: "Set Odometer"
+    icon: mdi:counter
+    unit_of_measurement: "strides"
+    min_value: 0
+    max_value: 10000000
+    step: 1
+    mode: box
+    entity_category: config
+    update_interval: ${ha_interval}
+    lambda: 'return id(odo_strides);'
+    set_action:
+      - lambda: |-
+          float delta = x - id(odo_strides);
+          id(odo_strides) = x;
+          id(day_start_odo) += delta;
+          id(session_start_strides) += delta;
+          if (id(day_start_odo) < 0) id(day_start_odo) = 0;
+          if (id(session_start_strides) < 0) id(session_start_strides) = 0;
+          ESP_LOGI("cubii", "odometer set to %.0f (delta %.0f)", x, delta);
+
 font:
   - file:
       type: gfonts
@@ -398,6 +635,31 @@ display:
     model: SSD1306_128X64
     address: 0x3c
     pages:
+      # First in the list, so this is what the display comes up on.
+      - id: page_daily
+        lambda: |-
+          // NaN for the first second after boot, before disp_day_strides runs.
+          float day = isnan(id(disp_day_strides).state) ? 0.0f
+                                                       : id(disp_day_strides).state;
+          float goal = id(daily_goal).state;
+          float frac = (isnan(goal) || goal <= 0) ? 0.0f : day / goal;
+          if (frac > 1.0f) frac = 1.0f;
+
+          it.print(0, 0, id(font_label), "TODAY");
+          if (id(scan_mode).state) it.print(64, 0, id(font_label),
+                                            TextAlign::TOP_CENTER, "SCAN");
+          if (id(day_goal_hit))
+            it.print(128, 0, id(font_label), TextAlign::TOP_RIGHT, "GOAL!");
+          else
+            it.printf(128, 0, id(font_label), TextAlign::TOP_RIGHT, "%.0f%%",
+                      frac * 100.0f);
+
+          it.printf(64, 30, id(font_huge), TextAlign::CENTER, "%.0f", day);
+
+          it.rectangle(0, 52, 128, 10);
+          int w = (int) (126.0f * frac + 0.5f);
+          if (w > 0) it.filled_rectangle(1, 53, w, 8);
+
       - id: page_summary
         lambda: |-
           int t = isnan(id(session_time).state) ? 0 : (int) id(session_time).state;
@@ -516,7 +778,7 @@ script:
           condition:
             lambda: 'return id(oled).get_active_page() == id(page_reset);'
           then:
-            - display.page.show: page_summary
+            - display.page.show: page_daily
       - component.update: oled
 
   # mode: restart means every call cancels the pending blank and starts the
@@ -536,13 +798,53 @@ script:
           id(oled).turn_off();
           id(screen_awake) = false;
 
+  # Compares a stored date against the clock rather than firing on_time at the
+  # reset hour, so a boundary crossed while the device was powered off still
+  # rolls -- on the next boot, as soon as the clock is valid.
+  - id: check_rollover
+    mode: single
+    then:
+      - lambda: |-
+          auto t = id(sntp_time).now();
+          if (!t.is_valid()) return;
+
+          // Shift the epoch back by the reset hour, then take the local date:
+          // everything before ${daily_reset_hour}:00 belongs to the day before.
+          ESPTime lt = ESPTime::from_epoch_local(t.timestamp - ${daily_reset_hour} * 3600);
+          uint32_t stamp = lt.year * 10000u + lt.month * 100u + lt.day_of_month;
+
+          float odo  = id(odo_strides);
+          float secs = isnan(id(total_time).state) ? 0.0f : id(total_time).state;
+
+          if (id(day_stamp) == 0) {
+            // First valid clock ever. Adopt today without inventing a yesterday.
+            id(day_stamp) = stamp;
+            id(day_start_odo) = odo;
+            id(day_start_secs) = secs;
+            ESP_LOGI("cubii", "daily counters start at %u", (unsigned) stamp);
+            return;
+          }
+
+          if (stamp == id(day_stamp)) return;
+
+          uint32_t prev = id(day_stamp);
+          id(yesterday_strides) = odo - id(day_start_odo);
+          id(yesterday_secs) = secs - id(day_start_secs);
+          if (id(yesterday_strides) < 0) id(yesterday_strides) = 0;
+          if (id(yesterday_secs) < 0) id(yesterday_secs) = 0;
+          id(day_start_odo) = odo;
+          id(day_start_secs) = secs;
+          id(day_goal_hit) = false;
+          id(day_stamp) = stamp;
+          ESP_LOGI("cubii", "daily rollover %u -> %u, closed out at %.0f strides",
+                   (unsigned) prev, (unsigned) stamp, id(yesterday_strides));
+
   - id: reset_session
     mode: restart
     then:
       - script.execute: screen_wake
       - lambda: |-
-          id(session_start_strides) =
-              isnan(id(total_strides).state) ? 0.0f : id(total_strides).state;
+          id(session_start_strides) = id(odo_strides);
           ESP_LOGI("cubii", "session reset at %.0f lifetime strides",
                    id(session_start_strides));
       - sensor.duty_time.reset: session_time
@@ -564,6 +866,10 @@ interval:
                   lambda: 'return id(oled).get_active_page() == id(page_reset);'
           then:
             - script.execute: next_page
+
+  - interval: 60s
+    then:
+      - script.execute: check_rollover
 
   # Re-arm the idle timer while pedaling, so a long session never blanks.
   - interval: 30s
