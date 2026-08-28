@@ -33,7 +33,7 @@ substitutions:
   dist_factor: "0.000621371"
 
   idle_timeout: 12s
-  debounce: 210ms
+  debounce: 200ms
   scan_interval: 8s
   screen_timeout: 3min
   ha_interval: 30s          # how often anything reaches Home Assistant
@@ -130,6 +130,8 @@ sensor:
       internal: true
       unit_of_measurement: "strides"
       accuracy_decimals: 0
+      on_value:
+        - script.execute: refresh_display
 
   - platform: template
     id: disp_strides
@@ -143,13 +145,19 @@ sensor:
     id: disp_distance
     internal: true
     update_interval: 1s
-    lambda: 'return id(disp_strides).state * ${meters_per_stride} * ${dist_factor};'
+    lambda: |-
+      if (isnan(id(total_strides).state)) return 0.0f;
+      return (id(total_strides).state - id(session_start_strides))
+             * ${meters_per_stride} * ${dist_factor};
 
   - platform: template
     id: disp_calories
     internal: true
     update_interval: 1s
-    lambda: 'return id(disp_strides).state * ${kcal_per_stride};'
+    lambda: |-
+      if (isnan(id(total_strides).state)) return 0.0f;
+      return (id(total_strides).state - id(session_start_strides))
+             * ${kcal_per_stride};
 
   - platform: duty_time
     id: session_time
@@ -351,6 +359,7 @@ binary_sensor:
                 lambda: 'return id(screen_awake);'
               then:
                 - switch.toggle: scan_mode
+                - component.update: oled
           - script.execute: screen_wake
 
 font:
@@ -388,7 +397,6 @@ display:
     id: oled
     model: SSD1306_128X64
     address: 0x3c
-    update_interval: 500ms
     pages:
       - id: page_summary
         lambda: |-
@@ -476,6 +484,18 @@ display:
           it.print(64, 42, id(font_mid), TextAlign::CENTER, "RESET");
 
 script:
+  # Recompute the three display sensors and repaint, in that order. Called
+  # from total_strides' on_value (once per stride) and from reset_session.
+  # The 1s update_interval on those sensors stays as a safety net for boot
+  # and for anything that changes while the wheel is stopped.
+  - id: refresh_display
+    mode: single
+    then:
+      - component.update: disp_strides
+      - component.update: disp_distance
+      - component.update: disp_calories
+      - component.update: oled
+
   # page_reset lives in the same page list, so both directions step over it.
   - id: prev_page
     mode: restart
@@ -526,6 +546,7 @@ script:
           ESP_LOGI("cubii", "session reset at %.0f lifetime strides",
                    id(session_start_strides));
       - sensor.duty_time.reset: session_time
+      - script.execute: refresh_display
       - display.page.show: page_reset
       - component.update: oled
       - display.page.show: page_summary
