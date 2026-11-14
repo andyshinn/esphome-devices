@@ -2,6 +2,7 @@ substitutions:
   on_speed: 100
   led_brightness: "0.25"
   pump_delay: "5s"
+  pump_run_timeout: "60"
 
 esphome:
   name: halloween-cauldron-pumps
@@ -10,20 +11,9 @@ esphome:
     then:
       - output.turn_on: neopixel_i2c_power
       - delay: 100ms
-      - lambda: |-
-          // Set LED based on pump status
-          if (id(any_pump_running).state) {
-            auto call = id(rgb_indicator).turn_on();
-            call.set_brightness(${led_brightness});
-            call.set_rgb(0.0, 1.0, 0.0);
-            call.perform();
-          } else {
-            auto call = id(rgb_indicator).turn_on();
-            call.set_brightness(${led_brightness});
-            call.set_rgb(1.0, 0.0, 0.0);
-            call.perform();
-          }
+      - script.execute: update_led
 
+  friendly_name: Cauldron Pumps
 esp32:
   board: adafruit_feather_esp32_v2
   framework:
@@ -43,11 +33,10 @@ wifi:
 api:
   reboot_timeout: 60min
   encryption:
-    key: !secret api_key_halloween_cauldron
-
+    key: !secret halloween_cauldron_pumps__encryption_key
 ota:
   - platform: esphome
-    password: !secret wifi_password
+    encryption:
 
 web_server:
   version: 3
@@ -89,110 +78,197 @@ binary_sensor:
     id: level_sensor_pump1
     device_class: running
     filters:
-      - delayed_on_off: ${pump_delay}
+      # Off passes immediately. A symmetric delay never fires if sloshing keeps
+      # the float bouncing, which leaves the pump running.
+      - delayed_on: ${pump_delay}
     pin:
       number: D14
       inverted: true
       mode:
         input: true
         pullup: true
-    on_press:
-      then:
-        - fan.turn_on:
-            id: pump1
-            speed: ${on_speed}
-    on_release:
-      then:
-        - fan.turn_off:
-            id: pump1
   - platform: gpio
     name: "Level Sensor Pump 2"
     id: level_sensor_pump2
     device_class: running
     filters:
-      - delayed_on_off: ${pump_delay}
+      # Off passes immediately. A symmetric delay never fires if sloshing keeps
+      # the float bouncing, which leaves the pump running.
+      - delayed_on: ${pump_delay}
     pin:
       number: D32
       inverted: true
       mode:
         input: true
         pullup: true
-    on_press:
-      then:
-        - fan.turn_on:
-            id: pump2
-            speed: ${on_speed}
-    on_release:
-      then:
-        - fan.turn_off:
-            id: pump2
   - platform: gpio
     name: "Level Sensor Pump 3"
     id: level_sensor_pump3
     device_class: running
     filters:
-      - delayed_on_off: ${pump_delay}
+      # Off passes immediately. A symmetric delay never fires if sloshing keeps
+      # the float bouncing, which leaves the pump running.
+      - delayed_on: ${pump_delay}
     pin:
       number: D15
       inverted: true
       mode:
         input: true
         pullup: true
-    on_press:
-      then:
-        - fan.turn_on:
-            id: pump3
-            speed: ${on_speed}
-    on_release:
-      then:
-        - fan.turn_off:
-            id: pump3
   - platform: gpio
     name: "Level Sensor Pump 4"
     id: level_sensor_pump4
     device_class: running
     filters:
-      - delayed_on_off: ${pump_delay}
+      # Off passes immediately. A symmetric delay never fires if sloshing keeps
+      # the float bouncing, which leaves the pump running.
+      - delayed_on: ${pump_delay}
     pin:
       number: D33
       inverted: true
       mode:
         input: true
         pullup: true
-    on_press:
-      then:
-        - fan.turn_on:
-            id: pump4
-            speed: ${on_speed}
-    on_release:
-      then:
-        - fan.turn_off:
-            id: pump4
   - platform: template
     name: "Any Pump Running"
     id: any_pump_running
     device_class: running
     lambda: |-
-      return id(level_sensor_pump1).state ||
-             id(level_sensor_pump2).state ||
-             id(level_sensor_pump3).state ||
-             id(level_sensor_pump4).state;
+      return id(pump1).state ||
+             id(pump2).state ||
+             id(pump3).state ||
+             id(pump4).state;
+    on_state:
+      then:
+        - script.execute: update_led
+  - platform: template
+    name: "Pump Fault"
+    id: pump_fault
+    device_class: problem
+    lambda: |-
+      if (id(pca9685_halloween).is_failed())
+        return true;
+      for (bool locked : id(pump_locked)) {
+        if (locked)
+          return true;
+      }
+      return false;
+    on_state:
+      then:
+        - script.execute: update_led
+
+switch:
+  - platform: template
+    name: "Auto Refill"
+    id: auto_refill
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    on_turn_off:
+      then:
+        - fan.turn_off: pump1
+        - fan.turn_off: pump2
+        - fan.turn_off: pump3
+        - fan.turn_off: pump4
+  - platform: template
+    name: "Pump 1 Manual Override"
+    id: pump1_manual
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+  - platform: template
+    name: "Pump 2 Manual Override"
+    id: pump2_manual
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+  - platform: template
+    name: "Pump 3 Manual Override"
+    id: pump3_manual
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+  - platform: template
+    name: "Pump 4 Manual Override"
+    id: pump4_manual
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+
+button:
+  - platform: template
+    name: "Reset Pump Fault"
     on_press:
       then:
-        - light.turn_on:
-            id: rgb_indicator
-            brightness: ${led_brightness}
-            red: 0%
-            green: 100%
-            blue: 0%
-    on_release:
-      then:
-        - light.turn_on:
-            id: rgb_indicator
-            brightness: ${led_brightness}
-            red: 100%
-            green: 0%
-            blue: 0%
+        - lambda: id(pump_locked).fill(false);
+
+globals:
+  - id: pump_locked
+    type: std::array<bool, 4>
+
+script:
+  - id: update_led
+    then:
+      - lambda: |-
+          // Purple = fault, green = pumping, red = idle
+          auto call = id(rgb_indicator).turn_on();
+          call.set_brightness(${led_brightness});
+          if (id(pump_fault).state) {
+            call.set_rgb(1.0, 0.0, 1.0);
+          } else if (id(any_pump_running).state) {
+            call.set_rgb(0.0, 1.0, 0.0);
+          } else {
+            call.set_rgb(1.0, 0.0, 0.0);
+          }
+          call.perform();
+
+# Only place pumps are started or stopped by level. Compares desired and actual
+# state every tick, so a missed edge can't leave a pump on. Manual pumps skip the
+# level check but still stop at the run timeout.
+interval:
+  - interval: 1s
+    then:
+      - lambda: |-
+          fan::Fan *pumps[] = {id(pump1), id(pump2), id(pump3), id(pump4)};
+          binary_sensor::BinarySensor *levels[] = {id(level_sensor_pump1), id(level_sensor_pump2),
+                                                   id(level_sensor_pump3), id(level_sensor_pump4)};
+          switch_::Switch *manual[] = {id(pump1_manual), id(pump2_manual), id(pump3_manual), id(pump4_manual)};
+          auto &locked = id(pump_locked);
+          static uint16_t run_seconds[4] = {};
+
+          for (int i = 0; i < 4; i++) {
+            const bool running = pumps[i]->state;
+            const bool automatic = id(auto_refill).state && !manual[i]->state;
+
+            // Counts the current run only, so every start gets the full timeout.
+            run_seconds[i] = running ? run_seconds[i] + 1 : 0;
+            const bool timed_out = run_seconds[i] >= ${pump_run_timeout};
+            if (timed_out)
+              ESP_LOGW("pump", "Pump %d reached the ${pump_run_timeout}s run timeout", i + 1);
+
+            // A low level would restart the pump on the next tick, so in auto it
+            // stays off until the level recovers. Manual pumps can restart right away.
+            if (timed_out && automatic) {
+              locked[i] = true;
+            } else if (!automatic || !levels[i]->state) {
+              locked[i] = false;
+            }
+
+            const bool want = !timed_out && !locked[i] && (automatic ? levels[i]->state : running);
+            if (want == running)
+              continue;
+            if (want) {
+              auto call = pumps[i]->turn_on();
+              call.set_speed(${on_speed});
+              call.perform();
+            } else {
+              pumps[i]->turn_off().perform();
+            }
+          }
+
+          // Failed writes mean a pump may not stop. A reboot recovers the I2C bus and
+          // re-inits the PCA9685. If that fails, is_failed() reports a fault with no reboot loop.
+          static uint8_t pca_error_seconds = 0;
+          pca_error_seconds = id(pca9685_halloween).status_has_warning() ? pca_error_seconds + 1 : 0;
+          if (pca_error_seconds >= 10) {
+            ESP_LOGE("pump", "PCA9685 writes failing, rebooting");
+            App.safe_reboot();
+          }
 
 pca9685:
   id: pca9685_halloween
@@ -278,7 +354,7 @@ fan:
 light:
   - platform: esp32_rmt_led_strip
     id: rgb_indicator
-    rgb_order: GRB
+    channel_colors: GRB
     pin: NEOPIXEL
     num_leds: 1
     chipset: ws2812

@@ -131,15 +131,23 @@ i2c:
 # Nothing daily is counted separately. day_start_odo is the odometer reading
 # at the last rollover and day_start_secs the lifetime pedaling seconds at the
 # same instant, so today = lifetime - snapshot. Those snapshots only move once
-# a day, which is why they can poll at 1s without touching flash: the poll is a
-# memcmp, and a write is only queued when the value actually changed.
+# a day, which is why they cost nothing: a restoring global memcmps itself
+# against its stored copy every loop and only QUEUES a write when it changed.
+#
+# The queue is flushed to flash by the preferences component, not by the
+# globals -- there is no per-global interval. flash_write_interval below is
+# therefore the real ${odo_flush} knob, and it applies to every restoring
+# global here.
 # ---------------------------------------------------------------------------
+preferences:
+  flash_write_interval: ${odo_flush}
+
 globals:
-  # Lifetime strides. Survives reboots; written every ${odo_flush}.
+  # Lifetime strides. Survives reboots; queued on change, flushed every
+  # ${odo_flush}, so a power cut can cost at most that much pedaling.
   - id: odo_strides
     type: float
     restore_value: yes
-    update_interval: ${odo_flush}
     initial_value: '0'
 
   # Last value seen from pulse_meter's boot-relative total, for the delta.
@@ -209,22 +217,8 @@ sensor:
       inverted: true
     unit_of_measurement: "RPM"
     accuracy_decimals: 0
-    # PULSE, not EDGE. The reed bounces ~8 electrical edges per revolution
-    # (measured with the ESP32 PCNT peripheral, unfiltered). EDGE mode absorbed
-    # that only by holding a 210ms blackout after each count, and the
-    # closed window scales with cadence -- so at slow pedaling the break chatter
-    # landed outside the blackout and counted a second stride.
-    #
-    # PULSE is level-based instead of time-since-last-count: it latches only
-    # when the contact holds closed for >= ${debounce}, and re-arms only when it
-    # holds open for >= ${debounce}. A bounce burst satisfies neither, so it is
-    # rejected outright, and the behaviour is the same at 10 RPM and 110 RPM
-    # because there is no cadence-dependent window.
-    #
-    # This only works because the filter is SHORT. At the old 210ms it would
-    # count nothing at all -- the closed window is only 38-120ms.
     internal_filter: ${debounce}
-    internal_filter_mode: PULSE
+    internal_filter_mode: EDGE
     timeout: ${idle_timeout}
     total:
       id: total_strides
@@ -232,13 +226,16 @@ sensor:
       unit_of_measurement: "strides"
       accuracy_decimals: 0
       on_value:
-        - script.execute: refresh_display
+        # Credit the odometer BEFORE repainting: disp_strides and
+        # disp_day_strides both derive from odo_strides, so a repaint that runs
+        # first paints the previous stride's numbers.
         - lambda: |-
             if (isnan(x)) return;
             float d = x - id(last_raw_total);
             if (d < 0) d = x;          // pulse_meter total restarted
             if (d > 0) id(odo_strides) += d;
             id(last_raw_total) = x;
+        - script.execute: refresh_display
 
   - platform: template
     id: disp_strides
@@ -251,8 +248,7 @@ sensor:
     internal: true
     update_interval: 1s
     lambda: |-
-      if (isnan(id(total_strides).state)) return 0.0f;
-      return (id(total_strides).state - id(session_start_strides))
+      return (id(odo_strides) - id(session_start_strides))
              * ${meters_per_stride} * ${dist_factor};
 
   - platform: template
@@ -260,8 +256,7 @@ sensor:
     internal: true
     update_interval: 1s
     lambda: |-
-      if (isnan(id(total_strides).state)) return 0.0f;
-      return (id(total_strides).state - id(session_start_strides))
+      return (id(odo_strides) - id(session_start_strides))
              * ${kcal_per_stride};
 
   # Today = lifetime - the snapshot taken at the last rollover. Also where the
@@ -746,16 +741,17 @@ display:
           it.print(64, 42, id(font_mid), TextAlign::CENTER, "RESET");
 
 script:
-  # Recompute the three display sensors and repaint, in that order. Called
-  # from total_strides' on_value (once per stride) and from reset_session.
-  # The 1s update_interval on those sensors stays as a safety net for boot
-  # and for anything that changes while the wheel is stopped.
+  # Recompute the four display sensors and repaint, in that order. Called from
+  # total_strides' on_value (once per stride, after the odometer is credited)
+  # and from reset_session. The 1s update_interval on those sensors stays as a
+  # safety net for boot and for anything that changes while the wheel is stopped.
   - id: refresh_display
     mode: single
     then:
       - component.update: disp_strides
       - component.update: disp_distance
       - component.update: disp_calories
+      - component.update: disp_day_strides
       - component.update: oled
 
   # page_reset lives in the same page list, so both directions step over it.
